@@ -4,16 +4,14 @@ import shutil
 from pathlib import Path
 
 import pandas as pd
-import torch
 import yaml
-from PIL import Image
-from torch.utils.data import Dataset
 
+from .yolo_dataset import YoloDataset
 from ..filesystem import FileSystem
-from ..transforms import ImageTransforms, MinPointAndSizeBBox
+from ..transforms import MinPointAndSizeBBox
 
 
-class SkyFusionDataset(Dataset):
+class SkyFusionDataset(YoloDataset):
     directories_mapping = {"train": "train", "val": "valid", "test": "test"}
     annotation_json = "_annotations.coco.json"
     default_dataset_path = FileSystem.DATASETS_DIR / "SkyFusion"
@@ -24,59 +22,12 @@ class SkyFusionDataset(Dataset):
         2: {"internal_id": 1, "name": "ship"},
         3: {"internal_id": 2, "name": "vehicle"},
     }
-    category_names = {
-        category["internal_id"]: category["name"]
-        for category in categories_mapping.values()
-    }
-
-    def __init__(
-        self,
-        dataset_path: Path | None = None,
-        split: str | None = "train",
-    ):
-        if dataset_path is None:
-            dataset_path = self.default_dataset_path
-
-        if not os.path.exists(
-            processed_dataset_path := dataset_path / self.default_preprocessed_dir
-        ):
-            data_yaml_path = self.export_to_yolo(dataset_path)
-        else:
-            data_yaml_path = processed_dataset_path / self.data_yaml_file
-
-        with open(data_yaml_path, "r") as f:
-            data_yaml = yaml.safe_load(f)
-
-        if split not in self.directories_mapping.keys():
-            raise ValueError(f"Invalid split: {split}")
-
-        images_path = processed_dataset_path / data_yaml[split]
-        labels_path = images_path.parent / "labels"
-
-        self.images_labels_paths = [
-            (
-                images_path / image_filename,
-                labels_path / self._label_filename(image_filename),
-            )
-            for image_filename in os.listdir(images_path)
-        ]
-
-    def __len__(self):
-        return len(self.images_labels_paths)
-
-    def __getitem__(self, idx: int):
-        image_path, label_path = self.images_labels_paths[idx]
-        image = Image.open(image_path)
-        image = ImageTransforms.preprocess(image)
-
-        image_annotations = []
-        with open(label_path, "r") as f:
-            for line in f.readlines():
-                annotation = list(map(float, line.strip().split(" ")))
-                image_annotations.append(torch.asarray(annotation, dtype=torch.float32))
-        image_annotations = torch.stack(image_annotations, dim=0)
-
-        return image, image_annotations
+    _category_names = [
+        category["name"]
+        for category in sorted(
+            categories_mapping.values(), key=lambda category: category["internal_id"]
+        )
+    ]
 
     @classmethod
     def export_to_yolo(
@@ -101,8 +52,8 @@ class SkyFusionDataset(Dataset):
 
             data_yaml[key] = os.path.relpath(images_dir, destination_dir)
 
-        data_yaml["nc"] = 3
-        data_yaml["names"] = cls.category_names
+        data_yaml["nc"] = len(cls._category_names)
+        data_yaml["names"] = cls._category_names
         with open(data_path, "w") as f:
             yaml.dump(data_yaml, f)
 
@@ -134,13 +85,17 @@ class SkyFusionDataset(Dataset):
         coco_json_path = source_dir / cls.annotation_json
         categories, images, annotations = cls._load_annotations_json(coco_json_path)
 
-        images_dir = destination_dir / "images"
-        labels_dir = destination_dir / "labels"
+        images_new_dir = destination_dir / cls.images_dir
+        labels_new_dir = destination_dir / cls.labels_dir
 
-        if os.path.exists(images_dir) and os.path.exists(labels_dir) and not force:
-            return images_dir
+        if (
+            os.path.exists(images_new_dir)
+            and os.path.exists(labels_new_dir)
+            and not force
+        ):
+            return images_new_dir
 
-        for directory in [images_dir, labels_dir]:
+        for directory in [images_new_dir, labels_new_dir]:
             if os.path.exists(directory):
                 shutil.rmtree(directory)
             os.makedirs(directory)
@@ -165,11 +120,11 @@ class SkyFusionDataset(Dataset):
                 f"img_{idx:05d}{os.path.splitext(image_old_filename)[1]}"
             )
             shutil.copy(
-                source_dir / image_old_filename, images_dir / image_new_filename
+                source_dir / image_old_filename, images_new_dir / image_new_filename
             )
 
             label_filename = cls._label_filename(image_new_filename)
-            with open(labels_dir / label_filename, "w") as label_file:
+            with open(labels_new_dir / label_filename, "w") as label_file:
                 label_file.write(
                     "\n".join(
                         [
@@ -179,4 +134,4 @@ class SkyFusionDataset(Dataset):
                     )
                 )
 
-        return images_dir
+        return images_new_dir
